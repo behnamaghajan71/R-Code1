@@ -1,0 +1,208 @@
+# Repeated stratified 5-fold cross-validation
+# PLDA classification for GSE152418
+# MLSeq 2.31.0
+
+install.packages("MLSeq")
+library(DESeq2)
+library(MLSeq)
+library(caret)
+
+set.seed(2026)
+
+# 1. Read raw counts and sample metadata
+counts_file <- "GSE152418_raw_counts_GRCh38.p13_NCBI.tsv"
+metadata_file <- "GSE152418_metadata_for_PLDA.csv"
+
+counts_df <- read.delim(counts_file, check.names = FALSE)
+metadata <- read.csv(metadata_file, stringsAsFactors = FALSE)
+
+rownames(counts_df) <- counts_df$GeneID
+counts_df$GeneID <- NULL
+
+# Match sample order between count matrix and metadata
+metadata <- metadata[match(colnames(counts_df), metadata$SampleID), ]
+
+stopifnot(
+  !anyNA(metadata$SampleID),
+  identical(colnames(counts_df), metadata$SampleID)
+)
+
+# Define class labels
+metadata$Group <- factor(metadata$Group,
+                         levels = c("Healthy", "COVID"))
+
+count_mat <- as.matrix(counts_df)
+storage.mode(count_mat) <- "integer"
+
+# Basic data checks
+stopifnot(
+  ncol(count_mat) == nrow(metadata),
+  all(count_mat >= 0),
+  !anyNA(count_mat),
+  all(table(metadata$Group) > 0)
+)
+
+# 2. Classification settings
+feature_numbers <- c(500, 1000, 2000)
+outer_folds <- 5
+outer_repeats <- 10
+
+results <- list()
+
+# 3. Evaluate each feature set
+for (n_features in feature_numbers) {
+  
+  repeat_results <- data.frame()
+  
+  for (r in seq_len(outer_repeats)) {
+    
+    # Stratified outer cross-validation
+    test_folds <- createFolds(
+      metadata$Group,
+      k = outer_folds,
+      returnTrain = FALSE
+    )
+    
+    predicted <- rep(NA_character_, nrow(metadata))
+    
+    for (fold in seq_len(outer_folds)) {
+      
+      test_idx <- test_folds[[fold]]
+      train_idx <- setdiff(seq_len(nrow(metadata)), test_idx)
+      
+      # Split raw counts
+      train_counts <- count_mat[, train_idx, drop = FALSE]
+      test_counts  <- count_mat[, test_idx, drop = FALSE]
+      
+      # Select high-variance genes using training data only
+      gene_variance <- apply(train_counts, 1, var, na.rm = TRUE)
+      
+      selected_genes <- names(
+        sort(gene_variance, decreasing = TRUE)
+      )[seq_len(min(n_features, length(gene_variance)))]
+      
+      train_counts <- train_counts[selected_genes, , drop = FALSE]
+      test_counts  <- test_counts[selected_genes, , drop = FALSE]
+      
+      # Add 1 to avoid zero-count problems
+      train_counts <- train_counts + 1L
+      test_counts  <- test_counts + 1L
+      
+      # Prepare training and test metadata
+      train_coldata <- DataFrame(
+        Group = metadata$Group[train_idx]
+      )
+      
+      test_coldata <- DataFrame(
+        Group = metadata$Group[test_idx]
+      )
+      
+      # Construct DESeqDataSet objects
+      train_dds <- DESeqDataSetFromMatrix(
+        countData = train_counts,
+        colData = train_coldata,
+        design = ~ Group
+      )
+      
+      test_dds <- DESeqDataSetFromMatrix(
+        countData = test_counts,
+        colData = test_coldata,
+        design = ~ Group
+      )
+      
+      # Inner cross-validation for PLDA tuning
+      plda_control <- discreteControl(
+        method = "repeatedcv",
+        number = 5,
+        repeats = 3,
+        tuneLength = 10
+      )
+      
+      # Fit standard PLDA
+      plda_fit <- classify(
+        data = train_dds,
+        method = "PLDA",
+        normalize = "deseq",
+        ref = "COVID",
+        control = plda_control
+      )
+      
+      # Predict independent test samples
+      predicted[test_idx] <- as.character(
+        predict(plda_fit, test_dds)
+      )
+    }
+    
+    # 4. Calculate performance measures
+    actual <- metadata$Group
+    
+    cm <- table(
+      Predicted = factor(predicted, levels = levels(actual)),
+      Actual = factor(actual, levels = levels(actual))
+    )
+    
+    TP <- cm["COVID", "COVID"]
+    TN <- cm["Healthy", "Healthy"]
+    FP <- cm["COVID", "Healthy"]
+    FN <- cm["Healthy", "COVID"]
+    
+    accuracy <- (TP + TN) / sum(cm)
+    sensitivity <- TP / (TP + FN)
+    specificity <- TN / (TN + FP)
+    
+    precision <- if ((TP + FP) == 0) 0 else TP / (TP + FP)
+    
+    F1 <- if ((precision + sensitivity) == 0) {
+      0
+    } else {
+      2 * precision * sensitivity / (precision + sensitivity)
+    }
+    
+    balanced_accuracy <- (sensitivity + specificity) / 2
+    
+    repeat_results <- rbind(
+      repeat_results,
+      data.frame(
+        Features = n_features,
+        Repeat = r,
+        Accuracy = accuracy,
+        Sensitivity = sensitivity,
+        Specificity = specificity,
+        Precision = precision,
+        F1 = F1,
+        Balanced_Accuracy = balanced_accuracy
+      )
+    )
+  }
+  
+  results[[as.character(n_features)]] <- repeat_results
+}
+# 5. Combine results
+all_results <- do.call(rbind, results)
+
+# Mean and standard deviation across outer repetitions
+summary_results <- aggregate(
+  . ~ Features,
+  data = all_results[, c(
+    "Features", "Accuracy", "Sensitivity",
+    "Specificity", "Precision", "F1",
+    "Balanced_Accuracy"
+  )],
+  FUN = function(x) c(Mean = mean(x), SD = sd(x))
+)
+
+print(summary_results)
+
+# Save detailed and summarized results
+write.csv(
+  all_results,
+  "PLDA_repeated_CV_detailed_results.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  summary_results,
+  "PLDA_repeated_CV_summary.csv",
+  row.names = FALSE
+)
+

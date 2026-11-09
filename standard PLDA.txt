@@ -1,0 +1,29 @@
+###### R 4.3.2
+###### covid19 39376 row and 34 col
+###### Top 2,000, 1,000, and 500 Variances 
+
+library(MLSeq)
+data <- read.table("C:/Users/hp/Desktop/thesis/article2/covid19.tsv", header = TRUE)
+rownames(data) <- data$GeneID
+data <- data[, -1]
+head(data)
+class <-data.frame(condition = factor(rep(c("C","H"), c(17,17))))
+class
+library(DESeq2)
+vars <- sort(apply(data, 1, var, na.rm = TRUE), decreasing = TRUE)
+#data <- data[names(vars)[1:500], ]
+#data <- data[names(vars)[1:1000], ]
+#data <- data[names(vars)[1:2000], ]
+nTest <- ceiling(ncol(data) * 0.3)
+ind <- sample(ncol(data), nTest, FALSE)
+data.train <- as.matrix(data[ ,-ind] + 1)
+data.test <- as.matrix(data[ ,ind] + 1)
+classtr <-data.frame(condition = class[-ind, ])
+classts <-data.frame(condition = class[ind, ])
+data.trainS4 = DESeqDataSetFromMatrix(countData = data.train, colData = classtr,design = formula(~condition))
+data.testS4 = DESeqDataSetFromMatrix(countData = data.test, colData = classts,design = formula(~condition))
+set.seed(123)
+ctrl.discrete <- discreteControl(method = "repeatedcv", number = 5, repeats = 10,tuneLength = 10)
+fit.plda <- classify(data = data.trainS4, method = "PLDA", normalize = "deseq",ref = "C", control = ctrl.discrete)
+selectedGenes(fit.plda)
+

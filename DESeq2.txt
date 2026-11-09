@@ -1,0 +1,42 @@
+# Version info: R 4.2.2, Biobase 2.58.0, GEOquery 2.66.0, limma 3.54.0
+# Differential expression analysis with DESeq2
+
+library(DESeq2)
+
+# load counts table from GEO
+urld <- "https://www.ncbi.nlm.nih.gov/geo/download/?format=file&type=rnaseq_counts"
+path <- paste(urld, "acc=GSE152418", "file=GSE152418_raw_counts_GRCh38.p13_NCBI.tsv.gz", sep="&");
+tbl <- as.matrix(data.table::fread(path, header=T, colClasses="integer"), rownames="GeneID")
+
+# load gene annotations 
+apath <- paste(urld, "type=rnaseq_counts", "file=Human.GRCh38.p13.annot.tsv.gz", sep="&")
+annot <- data.table::fread(apath, header=T, quote="", stringsAsFactors=F, data.table=F)
+rownames(annot) <- annot$GeneID
+
+# sample selection
+gsms <- "0000000000000000011111111111111111"
+sml <- strsplit(gsms, split="")[[1]]
+
+# group membership for samples
+gs <- factor(sml)
+groups <- make.names(c("C","H"))
+levels(gs) <- groups
+sample_info <- data.frame(Group = gs, row.names = colnames(tbl))
+
+# pre-filter low count genes
+# keep genes with at least N counts > 10, where N = size of smallest group
+keep <- rowSums( tbl >= 10 ) >= min(table(gs))
+tbl <- tbl[keep, ]
+
+ds <- DESeqDataSetFromMatrix(countData=tbl, colData=sample_info, design= ~Group)
+
+ds <- DESeq(ds, test="Wald", sfType="poscount")
+
+# extract results for top genes table
+r <- results (ds, contrast=c("Group", groups[1], groups[2]), alpha=0.05, pAdjustMethod ="fdr")
+
+tT <- r[order(r$padj),] 
+tT <- merge(as.data.frame(tT), annot, by=0, sort=F)
+
+tT <- subset(tT, select=c("GeneID","padj","pvalue","lfcSE","stat","log2FoldChange","baseMean","Symbol","Description"))
+write.table(tT, file=stdout(), row.names=F, sep="\t")
